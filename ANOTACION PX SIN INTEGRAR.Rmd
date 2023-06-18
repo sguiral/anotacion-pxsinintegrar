@@ -1,0 +1,2012 @@
+---
+title: "PEC3"
+output: html_document
+date: "2023-05-03"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(Seurat)
+library(patchwork)
+```
+
+```{r GSE115469}
+GSE115469_NF <- read.csv("C:/Users/sandr/Downloads/GSE115469_Data.csv", row.names = 1)
+
+GSE115469_NF <- CreateSeuratObject(counts=GSE115469_NF, project="PEC2")
+
+GSE115469_NF <- subset(GSE115469_NF, subset = nFeature_RNA > 1)
+```
+
+```{r subset}
+VlnPlot(GSE115469_NF, features = c("nFeature_RNA","nCount_RNA" ), ncol = 2)
+
+plot1 <- FeatureScatter(GSE115469_NF, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1
+
+P1TLH <- WhichCells(GSE115469_NF, expression = nFeature_RNA > 4000 & orig.ident == "P1TLH")
+P2TLH <- WhichCells(GSE115469_NF, expression = nFeature_RNA > 1800 & orig.ident == "P2TLH")
+P3TLH <- WhichCells(GSE115469_NF, expression = nFeature_RNA > 3000 & orig.ident == "P3TLH")
+P4TLH <- WhichCells(GSE115469_NF, expression = nFeature_RNA > 3000 & orig.ident == "P4TLH")
+P4TLHlow <- WhichCells(GSE115469_NF, expression = nFeature_RNA < 200 & orig.ident == "P4TLH")
+P5TLH <- WhichCells(GSE115469_NF, expression = nFeature_RNA > 2000  & orig.ident == "P5TLH")
+P5TLHlow <- WhichCells(GSE115469_NF, expression = nFeature_RNA < 200  & orig.ident == "P5TLH")
+
+GSE115469 <- subset(GSE115469_NF, cells=setdiff(WhichCells(GSE115469_NF),c(P1TLH, P2TLH, P3TLH, P4TLH, P4TLHlow, P5TLH, P5TLHlow)))
+```
+
+
+
+```{r normalizacion}
+GSE115469 <- NormalizeData(GSE115469)
+```
+```{R}
+GSE115469 <- FindVariableFeatures(GSE115469, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(GSE115469), 10)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(GSE115469)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+
+```
+```{r scaling+linealdimensionreduction}
+all.genes <- rownames(GSE115469)
+GSE115469 <- ScaleData(GSE115469, features = all.genes)
+
+GSE115469 <- RunPCA(GSE115469, features = VariableFeatures(object = GSE115469))
+
+# Examine and visualize PCA results a few different ways
+print(GSE115469[["pca"]], dims = 1:5, nfeatures = 5)
+```
+```{r}
+ElbowPlot(GSE115469)
+```
+
+
+
+
+```{r}
+
+GSE115469<- FindNeighbors(GSE115469, reduction = "pca", dims = 1:20)
+GSE115469 <- FindClusters(GSE115469, reduction = "pca")
+GSE115469 <- RunUMAP(GSE115469, reduction = "pca", dims = 1:20)
+
+```
+```{r visualizacion}
+p1 <- DimPlot(GSE115469, reduction = "umap", group.by = "orig.ident")
+p2 <- DimPlot(GSE115469, reduction = "umap", label = TRUE, repel = TRUE)
+p1 + p2
+```
+```{r}
+DimPlot(GSE115469, reduction = "umap", split.by = "orig.ident")
+```
+
+```{r ANNOTATION ScTypeload function}
+# load gene set preparation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R")
+# load cell type annotation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
+
+```
+```{r}
+library(xlsx)
+```
+```{r}
+library("openxlsx")
+```
+```{r}
+library(HGNChelper)
+```
+
+```{r}
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue = "Liver" 
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+```
+
+```{r}
+# get cell-type by cell matrix
+es.max = sctype_score(scRNAseqData = GSE115469[["RNA"]]@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = NULL) 
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(GSE115469@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(GSE115469@meta.data[GSE115469@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(GSE115469@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+```
+```{r}
+GSE115469@meta.data$customclassif = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  GSE115469@meta.data$customclassif[GSE115469@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(immune.combined, 
+        
+        , label = TRUE, repel = TRUE, group.by = 'customclassif')        
+
+```
+```{r immune cells}
+immunecells <- subset(GSE115469, subset = customclassif == "Immune system cells")
+```
+
+```{r anotation immune cells}
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue = "Immune system"
+
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+
+
+# get cell-type by cell matrix
+es.max = sctype_score(scRNAseqData = immunecells[["RNA"]]@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = gs_list$gs_negative) 
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(immunecells@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(immunecells@meta.data[immunecells@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(immunecells@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+
+immunecells@meta.data$customclassif = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  immunecells@meta.data$customclassif[immunecells@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(immunecells, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'customclassif')        
+
+```
+```{r}
+# Cogemos el dataframe con la metadata del objeto seurat completo
+metadata_all <- GSE115469@meta.data
+
+# En ese dataframe, creamos una variable que se llama cell_type y le asignamos los valores de las anotaciones que ya teniamos (luego modificaremos esta variable nueva)
+metadata_all$cell_type <- metadata_all$customclassif
+
+# Cogemos el dataframe con la metadata del objeto seurat subset (el que contiene solo celulas immunitarias que ya has anotado)
+metadata_immune <- immunecells@meta.data
+
+# De la variable cell_type, cambiamos los valores de las células presentes en el subset immunitarias y les cambiamos la anotación por la nueva (la presente en el subset)
+metadata_all$cell_type[rownames(metadata_all) %in% rownames(metadata_immune)] <- metadata_immune$customclassif
+
+# Actualizamos el metadata del seurat completo
+GSE115469@meta.data <- metadata_all
+
+
+```
+
+```{r}
+DimPlot(GSE115469, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'cell_type')  
+```
+
+
+# P1TLH
+
+```{r}
+P1TLH<-subset(GSE115469, orig.ident=="P1TLH")
+P1TLH
+```
+
+```{r normalizacion}
+P1TLH <- NormalizeData(P1TLH)
+```
+```{R}
+P1TLH <- FindVariableFeatures(P1TLH, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(P1TLH), 10)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(P1TLH)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+
+```
+```{r scaling+linealdimensionreduction}
+all.genes <- rownames(P1TLH)
+P1TLH <- ScaleData(P1TLH, features = all.genes)
+
+P1TLH <- RunPCA(P1TLH, features = VariableFeatures(object = P1TLH))
+
+# Examine and visualize PCA results a few different ways
+print(P1TLH[["pca"]], dims = 1:5, nfeatures = 5)
+```
+```{r}
+ElbowPlot(P1TLH)
+```
+
+
+
+
+```{r}
+
+P1TLH<- FindNeighbors(P1TLH, reduction = "pca", dims = 1:20)
+P1TLH <- FindClusters(P1TLH, reduction = "pca")
+P1TLH <- RunUMAP(P1TLH, reduction = "pca", dims = 1:20)
+
+```
+```{r visualizacion}
+p1 <- DimPlot(P1TLH, reduction = "umap", group.by = "orig.ident")
+p2 <- DimPlot(P1TLH, reduction = "umap", label = TRUE, repel = TRUE)
+p1 + p2
+```
+```{r}
+DimPlot(P1TLH, reduction = "umap", split.by = "orig.ident")
+```
+
+```{r ANNOTATION ScTypeload function}
+# load gene set preparation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R")
+# load cell type annotation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
+
+```
+```{r}
+library(xlsx)
+library("openxlsx")
+library(HGNChelper)
+```
+
+```{r}
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue = "Liver" 
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+```
+
+```{r}
+# get cell-type by cell matrix
+es.max = sctype_score(scRNAseqData = P1TLH[["RNA"]]@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = NULL) 
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(P1TLH@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(P1TLH@meta.data[P1TLH@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(P1TLH@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+```
+```{r}
+P1TLH@meta.data$customclassif = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  P1TLH@meta.data$customclassif[P1TLH@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(immune.combined, 
+        
+        , label = TRUE, repel = TRUE, group.by = 'customclassif')        
+
+```
+```{r immune cells}
+immunecells <- subset(P1TLH, subset = customclassif == "Immune system cells")
+```
+
+```{r anotation immune cells}
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue = "Immune system"
+
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+
+
+# get cell-type by cell matrix
+es.max = sctype_score(scRNAseqData = immunecells[["RNA"]]@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = gs_list$gs_negative) 
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(immunecells@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(immunecells@meta.data[immunecells@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(immunecells@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+
+immunecells@meta.data$customclassif = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  immunecells@meta.data$customclassif[immunecells@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(immunecells, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'customclassif')        
+
+```
+```{r}
+# Cogemos el dataframe con la metadata del objeto seurat completo
+metadata_all <- P1TLH@meta.data
+
+# En ese dataframe, creamos una variable que se llama cell_type y le asignamos los valores de las anotaciones que ya teniamos (luego modificaremos esta variable nueva)
+metadata_all$cell_type <- metadata_all$customclassif
+
+# Cogemos el dataframe con la metadata del objeto seurat subset (el que contiene solo celulas immunitarias que ya has anotado)
+metadata_immune <- immunecells@meta.data
+
+# De la variable cell_type, cambiamos los valores de las células presentes en el subset immunitarias y les cambiamos la anotación por la nueva (la presente en el subset)
+metadata_all$cell_type[rownames(metadata_all) %in% rownames(metadata_immune)] <- metadata_immune$customclassif
+
+# Actualizamos el metadata del seurat completo
+P1TLH@meta.data <- metadata_all
+
+
+```
+
+```{r}
+DimPlot(P1TLH, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'cell_type')  
+```
+
+# P2TLH
+
+```{r}
+P2TLH<-subset(GSE115469, orig.ident=="P2TLH")
+P2TLH
+```
+
+```{r normalizacion}
+P2TLH <- NormalizeData(P2TLH)
+```
+```{R}
+P2TLH <- FindVariableFeatures(P2TLH, selection.method = "vst", nfeatures = 2000)
+
+top10 <- head(VariableFeatures(P2TLH), 10)
+
+plot1 <- VariableFeaturePlot(P2TLH)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+
+all.genes <- rownames(P2TLH)
+P2TLH <- ScaleData(P2TLH, features = all.genes)
+
+P2TLH <- RunPCA(P2TLH, features = VariableFeatures(object = P2TLH))
+
+print(P2TLH[["pca"]], dims = 1:5, nfeatures = 5)
+
+ElbowPlot(P2TLH)
+```
+
+```{r}
+
+P2TLH<- FindNeighbors(P2TLH, reduction = "pca", dims = 1:20)
+P2TLH <- FindClusters(P2TLH, reduction = "pca")
+P2TLH <- RunUMAP(P2TLH, reduction = "pca", dims = 1:20)
+
+```
+```{r visualizacion}
+p1 <- DimPlot(P2TLH, reduction = "umap", group.by = "orig.ident")
+p2 <- DimPlot(P2TLH, reduction = "umap", label = TRUE, repel = TRUE)
+p1 + p2
+```
+```{r}
+DimPlot(P2TLH, reduction = "umap", split.by = "orig.ident")
+```
+
+```{r ANNOTATION ScTypeload function}
+# load gene set preparation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R")
+# load cell type annotation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
+
+```
+
+
+```{r}
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue = "Liver" 
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+```
+
+```{r}
+# get cell-type by cell matrix
+es.max = sctype_score(scRNAseqData = P2TLH[["RNA"]]@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = NULL) 
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(P2TLH@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(P2TLH@meta.data[P2TLH@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(P2TLH@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+```
+```{r}
+P2TLH@meta.data$customclassif = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  P2TLH@meta.data$customclassif[P2TLH@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(immune.combined, 
+        
+        , label = TRUE, repel = TRUE, group.by = 'customclassif')        
+
+```
+```{r immune cells}
+immunecells <- subset(P2TLH, subset = customclassif == "Immune system cells")
+```
+
+```{r anotation immune cells}
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue = "Immune system"
+
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+
+
+# get cell-type by cell matrix
+es.max = sctype_score(scRNAseqData = immunecells[["RNA"]]@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = gs_list$gs_negative) 
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(immunecells@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(immunecells@meta.data[immunecells@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(immunecells@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+
+immunecells@meta.data$customclassif = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  immunecells@meta.data$customclassif[immunecells@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(immunecells, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'customclassif')        
+
+```
+```{r}
+# Cogemos el dataframe con la metadata del objeto seurat completo
+metadata_all <- P2TLH@meta.data
+
+# En ese dataframe, creamos una variable que se llama cell_type y le asignamos los valores de las anotaciones que ya teniamos (luego modificaremos esta variable nueva)
+metadata_all$cell_type <- metadata_all$customclassif
+
+# Cogemos el dataframe con la metadata del objeto seurat subset (el que contiene solo celulas immunitarias que ya has anotado)
+metadata_immune <- immunecells@meta.data
+
+# De la variable cell_type, cambiamos los valores de las células presentes en el subset immunitarias y les cambiamos la anotación por la nueva (la presente en el subset)
+metadata_all$cell_type[rownames(metadata_all) %in% rownames(metadata_immune)] <- metadata_immune$customclassif
+
+# Actualizamos el metadata del seurat completo
+P2TLH@meta.data <- metadata_all
+
+
+```
+
+```{r}
+DimPlot(P2TLH, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'cell_type')  
+```
+
+# P3TLH
+
+```{r}
+P3TLH<-subset(GSE115469, orig.ident=="P3TLH")
+P3TLH
+```
+
+```{r normalizacion}
+P3TLH <- NormalizeData(P3TLH)
+```
+```{R}
+P3TLH <- FindVariableFeatures(P3TLH, selection.method = "vst", nfeatures = 2000)
+
+top10 <- head(VariableFeatures(P3TLH), 10)
+
+plot1 <- VariableFeaturePlot(P3TLH)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+
+all.genes <- rownames(P3TLH)
+P3TLH <- ScaleData(P3TLH, features = all.genes)
+
+P3TLH <- RunPCA(P3TLH, features = VariableFeatures(object = P3TLH))
+
+print(P3TLH[["pca"]], dims = 1:5, nfeatures = 5)
+
+ElbowPlot(P3TLH)
+```
+
+```{r}
+
+P3TLH<- FindNeighbors(P3TLH, reduction = "pca", dims = 1:20)
+P3TLH <- FindClusters(P3TLH, reduction = "pca")
+P3TLH <- RunUMAP(P3TLH, reduction = "pca", dims = 1:20)
+
+```
+```{r visualizacion}
+p1 <- DimPlot(P3TLH, reduction = "umap", group.by = "orig.ident")
+p2 <- DimPlot(P3TLH, reduction = "umap", label = TRUE, repel = TRUE)
+p1 + p2
+```
+```{r}
+DimPlot(P3TLH, reduction = "umap", split.by = "orig.ident")
+```
+
+```{r ANNOTATION ScTypeload function}
+# load gene set preparation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R")
+# load cell type annotation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
+
+```
+
+
+```{r}
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue = "Liver" 
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+```
+
+```{r}
+# get cell-type by cell matrix
+es.max = sctype_score(scRNAseqData = P3TLH[["RNA"]]@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = NULL) 
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(P3TLH@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(P3TLH@meta.data[P3TLH@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(P3TLH@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+```
+```{r}
+P3TLH@meta.data$customclassif = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  P3TLH@meta.data$customclassif[P3TLH@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(immune.combined, 
+        
+        , label = TRUE, repel = TRUE, group.by = 'customclassif')        
+
+```
+```{r immune cells}
+immunecells <- subset(P3TLH, subset = customclassif == "Immune system cells")
+```
+
+```{r anotation immune cells}
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue = "Immune system"
+
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+
+
+# get cell-type by cell matrix
+es.max = sctype_score(scRNAseqData = immunecells[["RNA"]]@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = gs_list$gs_negative) 
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(immunecells@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(immunecells@meta.data[immunecells@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(immunecells@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+
+immunecells@meta.data$customclassif = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  immunecells@meta.data$customclassif[immunecells@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(immunecells, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'customclassif')        
+
+```
+```{r}
+# Cogemos el dataframe con la metadata del objeto seurat completo
+metadata_all <- P3TLH@meta.data
+
+# En ese dataframe, creamos una variable que se llama cell_type y le asignamos los valores de las anotaciones que ya teniamos (luego modificaremos esta variable nueva)
+metadata_all$cell_type <- metadata_all$customclassif
+
+# Cogemos el dataframe con la metadata del objeto seurat subset (el que contiene solo celulas immunitarias que ya has anotado)
+metadata_immune <- immunecells@meta.data
+
+# De la variable cell_type, cambiamos los valores de las células presentes en el subset immunitarias y les cambiamos la anotación por la nueva (la presente en el subset)
+metadata_all$cell_type[rownames(metadata_all) %in% rownames(metadata_immune)] <- metadata_immune$customclassif
+
+# Actualizamos el metadata del seurat completo
+P3TLH@meta.data <- metadata_all
+
+
+```
+
+```{r}
+DimPlot(P3TLH, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'cell_type')  
+```
+# P4TLH
+
+```{r}
+P4TLH<-subset(GSE115469, orig.ident=="P4TLH")
+P4TLH
+```
+
+```{r normalizacion}
+P4TLH <- NormalizeData(P4TLH)
+```
+```{R}
+P4TLH <- FindVariableFeatures(P4TLH, selection.method = "vst", nfeatures = 2000)
+
+top10 <- head(VariableFeatures(P4TLH), 10)
+
+plot1 <- VariableFeaturePlot(P4TLH)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+
+all.genes <- rownames(P4TLH)
+P4TLH <- ScaleData(P4TLH, features = all.genes)
+
+P4TLH <- RunPCA(P4TLH, features = VariableFeatures(object = P4TLH))
+
+print(P4TLH[["pca"]], dims = 1:5, nfeatures = 5)
+
+ElbowPlot(P4TLH)
+```
+
+```{r}
+
+P4TLH<- FindNeighbors(P4TLH, reduction = "pca", dims = 1:20)
+P4TLH <- FindClusters(P4TLH, reduction = "pca")
+P4TLH <- RunUMAP(P4TLH, reduction = "pca", dims = 1:20)
+
+```
+```{r visualizacion}
+p1 <- DimPlot(P4TLH, reduction = "umap", group.by = "orig.ident")
+p2 <- DimPlot(P4TLH, reduction = "umap", label = TRUE, repel = TRUE)
+p1 + p2
+```
+```{r}
+DimPlot(P4TLH, reduction = "umap", split.by = "orig.ident")
+```
+
+```{r ANNOTATION ScTypeload function}
+# load gene set preparation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R")
+# load cell type annotation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
+
+```
+
+
+```{r}
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue = "Liver" 
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+```
+
+```{r}
+# get cell-type by cell matrix
+es.max = sctype_score(scRNAseqData = P4TLH[["RNA"]]@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = NULL) 
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(P4TLH@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(P4TLH@meta.data[P4TLH@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(P4TLH@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+```
+```{r}
+P4TLH@meta.data$customclassif = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  P4TLH@meta.data$customclassif[P2TLH@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(immune.combined, 
+        
+        , label = TRUE, repel = TRUE, group.by = 'customclassif')        
+
+```
+```{r immune cells}
+immunecells <- subset(P4TLH, subset = customclassif == "Immune system cells")
+```
+
+```{r anotation immune cells}
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue = "Immune system"
+
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+
+
+# get cell-type by cell matrix
+es.max = sctype_score(scRNAseqData = immunecells[["RNA"]]@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = gs_list$gs_negative) 
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(immunecells@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(immunecells@meta.data[immunecells@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(immunecells@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+
+immunecells@meta.data$customclassif = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  immunecells@meta.data$customclassif[immunecells@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(immunecells, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'customclassif')        
+
+```
+```{r}
+# Cogemos el dataframe con la metadata del objeto seurat completo
+metadata_all <- P4TLH@meta.data
+
+# En ese dataframe, creamos una variable que se llama cell_type y le asignamos los valores de las anotaciones que ya teniamos (luego modificaremos esta variable nueva)
+metadata_all$cell_type <- metadata_all$customclassif
+
+# Cogemos el dataframe con la metadata del objeto seurat subset (el que contiene solo celulas immunitarias que ya has anotado)
+metadata_immune <- immunecells@meta.data
+
+# De la variable cell_type, cambiamos los valores de las células presentes en el subset immunitarias y les cambiamos la anotación por la nueva (la presente en el subset)
+metadata_all$cell_type[rownames(metadata_all) %in% rownames(metadata_immune)] <- metadata_immune$customclassif
+
+# Actualizamos el metadata del seurat completo
+P4TLH@meta.data <- metadata_all
+
+
+```
+
+```{r}
+DimPlot(P4TLH, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'cell_type')  
+```
+# P5TLH
+
+```{r}
+P5TLH<-subset(GSE115469, orig.ident=="P5TLH")
+P5TLH
+```
+
+```{r normalizacion}
+P5TLH <- NormalizeData(P5TLH)
+```
+```{R}
+P5TLH <- FindVariableFeatures(P5TLH, selection.method = "vst", nfeatures = 2000)
+
+top10 <- head(VariableFeatures(P5TLH), 10)
+
+plot1 <- VariableFeaturePlot(P5TLH)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+
+all.genes <- rownames(P5TLH)
+P5TLH <- ScaleData(P5TLH, features = all.genes)
+
+P5TLH <- RunPCA(P5TLH, features = VariableFeatures(object = P5TLH))
+
+print(P5TLH[["pca"]], dims = 1:5, nfeatures = 5)
+
+ElbowPlot(P5TLH)
+```
+
+```{r}
+
+P5TLH<- FindNeighbors(P5TLH, reduction = "pca", dims = 1:20)
+P5TLH <- FindClusters(P5TLH, reduction = "pca")
+P5TLH <- RunUMAP(P5TLH, reduction = "pca", dims = 1:20)
+
+```
+```{r visualizacion}
+p1 <- DimPlot(P5TLH, reduction = "umap", group.by = "orig.ident")
+p2 <- DimPlot(P5TLH, reduction = "umap", label = TRUE, repel = TRUE)
+p1 + p2
+```
+```{r}
+DimPlot(P5TLH, reduction = "umap", split.by = "orig.ident")
+```
+
+```{r ANNOTATION ScTypeload function}
+# load gene set preparation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R")
+# load cell type annotation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
+
+```
+
+
+```{r}
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue = "Liver" 
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+```
+
+```{r}
+# get cell-type by cell matrix
+es.max = sctype_score(scRNAseqData = P5TLH[["RNA"]]@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = NULL) 
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(P5TLH@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(P5TLH@meta.data[P5TLH@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(P5TLH@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+```
+```{r}
+P5TLH@meta.data$customclassif = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  P5TLH@meta.data$customclassif[P5TLH@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(immune.combined, 
+        
+        , label = TRUE, repel = TRUE, group.by = 'customclassif')        
+
+```
+```{r immune cells}
+immunecells <- subset(P5TLH, subset = customclassif == "Immune system cells")
+```
+
+```{r anotation immune cells}
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue = "Immune system"
+
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+
+
+# get cell-type by cell matrix
+es.max = sctype_score(scRNAseqData = immunecells[["RNA"]]@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = gs_list$gs_negative) 
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(immunecells@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(immunecells@meta.data[immunecells@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(immunecells@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+
+immunecells@meta.data$customclassif = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  immunecells@meta.data$customclassif[immunecells@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(immunecells, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'customclassif')        
+
+```
+```{r}
+# Cogemos el dataframe con la metadata del objeto seurat completo
+metadata_all <- P5TLH@meta.data
+
+# En ese dataframe, creamos una variable que se llama cell_type y le asignamos los valores de las anotaciones que ya teniamos (luego modificaremos esta variable nueva)
+metadata_all$cell_type <- metadata_all$customclassif
+
+# Cogemos el dataframe con la metadata del objeto seurat subset (el que contiene solo celulas immunitarias que ya has anotado)
+metadata_immune <- immunecells@meta.data
+
+# De la variable cell_type, cambiamos los valores de las células presentes en el subset immunitarias y les cambiamos la anotación por la nueva (la presente en el subset)
+metadata_all$cell_type[rownames(metadata_all) %in% rownames(metadata_immune)] <- metadata_immune$customclassif
+
+# Actualizamos el metadata del seurat completo
+P5TLH@meta.data <- metadata_all
+
+
+```
+
+```{r}
+DimPlot(P5TLH, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'cell_type')  
+```
+## DATABASE2
+
+#P301
+
+```{r GSE124395}
+GSE124395_NF<- readRDS("C:/Users/sandr/Downloads/GSE124395/GSE124395_Normalhumanliverdata.RData")
+GSE124395_NF<-CreateSeuratObject(counts=GSE124395_NF)
+```
+```{r}
+P301<-subset(GSE124395_NF, orig.ident=="P301")
+```
+
+```{r normalizacion}
+P301 <- NormalizeData(P301)
+```
+```{R}
+P301 <- FindVariableFeatures(P301, selection.method = "vst", nfeatures = 2000)
+
+top10 <- head(VariableFeatures(P301), 10)
+
+plot1 <- VariableFeaturePlot(P301)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+
+all.genes <- rownames(P301)
+P301 <- ScaleData(P301, features = all.genes)
+
+P301 <- RunPCA(P301, features = VariableFeatures(object = P301))
+
+print(P301[["pca"]], dims = 1:5, nfeatures = 5)
+
+ElbowPlot(P301)
+```
+
+```{r}
+
+P301<- FindNeighbors(P301, reduction = "pca", dims = 1:20)
+P301 <- FindClusters(P301, reduction = "pca")
+P301 <- RunUMAP(P301, reduction = "pca", dims = 1:20)
+
+```
+```{r visualizacion}
+p1 <- DimPlot(P301, reduction = "umap", group.by = "orig.ident")
+p2 <- DimPlot(P301, reduction = "umap", label = TRUE, repel = TRUE)
+p1 + p2
+```
+```{r}
+DimPlot(P301, reduction = "umap", split.by = "orig.ident")
+```
+
+```{r ANNOTATION ScTypeload function}
+# load gene set preparation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R")
+# load cell type annotation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
+
+```
+
+
+```{r}
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue = "Liver" 
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+```
+
+```{r}
+# get cell-type by cell matrix
+es.max = sctype_score(scRNAseqData = P301[["RNA"]]@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = NULL) 
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(P301@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(P301@meta.data[P301@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(P301@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+```
+```{r}
+P301@meta.data$customclassif = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  P301@meta.data$customclassif[P301@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(immune.combined, 
+        
+        , label = TRUE, repel = TRUE, group.by = 'customclassif')        
+
+```
+```{r immune cells}
+immunecells <- subset(P301, subset = customclassif == "Immune system cells")
+```
+
+```{r anotation immune cells}
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue = "Immune system"
+
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+
+
+# get cell-type by cell matrix
+es.max = sctype_score(scRNAseqData = immunecells[["RNA"]]@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = gs_list$gs_negative) 
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(immunecells@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(immunecells@meta.data[immunecells@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(immunecells@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+
+immunecells@meta.data$customclassif = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  immunecells@meta.data$customclassif[immunecells@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(immunecells, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'customclassif')        
+
+```
+```{r}
+# Cogemos el dataframe con la metadata del objeto seurat completo
+metadata_all <- P301@meta.data
+
+# En ese dataframe, creamos una variable que se llama cell_type y le asignamos los valores de las anotaciones que ya teniamos (luego modificaremos esta variable nueva)
+metadata_all$cell_type <- metadata_all$customclassif
+
+# Cogemos el dataframe con la metadata del objeto seurat subset (el que contiene solo celulas immunitarias que ya has anotado)
+metadata_immune <- immunecells@meta.data
+
+# De la variable cell_type, cambiamos los valores de las células presentes en el subset immunitarias y les cambiamos la anotación por la nueva (la presente en el subset)
+metadata_all$cell_type[rownames(metadata_all) %in% rownames(metadata_immune)] <- metadata_immune$customclassif
+
+# Actualizamos el metadata del seurat completo
+P301@meta.data <- metadata_all
+
+
+```
+
+```{r}
+DimPlot(P301, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'cell_type') 
+```
+
+# P304
+
+```{r}
+P304<-subset(GSE124395_NF, orig.ident=="P304")
+```
+
+
+```{r normalizacion}
+P304 <- NormalizeData(P304)
+```
+```{R}
+P304 <- FindVariableFeatures(P304, selection.method = "vst", nfeatures = 2000)
+
+top10 <- head(VariableFeatures(P304), 10)
+
+plot1 <- VariableFeaturePlot(P304)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+
+all.genes <- rownames(P304)
+P304 <- ScaleData(P304, features = all.genes)
+
+P304 <- RunPCA(P304, features = VariableFeatures(object = P3TLH))
+
+print(P304[["pca"]], dims = 1:5, nfeatures = 5)
+
+ElbowPlot(P304)
+```
+
+```{r}
+
+P304<- FindNeighbors(P304, reduction = "pca", dims = 1:20)
+P304 <- FindClusters(P304, reduction = "pca")
+P304 <- RunUMAP(P304, reduction = "pca", dims = 1:20)
+
+```
+```{r visualizacion}
+p1 <- DimPlot(P304, reduction = "umap", group.by = "orig.ident")
+p2 <- DimPlot(P304, reduction = "umap", label = TRUE, repel = TRUE)
+p1 + p2
+```
+```{r}
+DimPlot(P304, reduction = "umap", split.by = "orig.ident")
+```
+
+```{r ANNOTATION ScTypeload function}
+# load gene set preparation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R")
+# load cell type annotation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
+
+```
+
+
+```{r}
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue = "Liver" 
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+```
+
+```{r}
+# get cell-type by cell matrix
+es.max = sctype_score(scRNAseqData = P304[["RNA"]]@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = NULL) 
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(P304@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(P304@meta.data[P304@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(P304@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+```
+```{r}
+P304@meta.data$customclassif = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  P304@meta.data$customclassif[P304@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(immune.combined, 
+        
+        , label = TRUE, repel = TRUE, group.by = 'customclassif')        
+
+```
+```{r immune cells}
+immunecells <- subset(P304, subset = customclassif == "Immune system cells")
+```
+
+```{r anotation immune cells}
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue = "Immune system"
+
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+
+
+# get cell-type by cell matrix
+es.max = sctype_score(scRNAseqData = immunecells[["RNA"]]@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = gs_list$gs_negative) 
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(immunecells@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(immunecells@meta.data[immunecells@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(immunecells@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+
+immunecells@meta.data$customclassif = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  immunecells@meta.data$customclassif[immunecells@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(immunecells, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'customclassif')        
+
+```
+```{r}
+# Cogemos el dataframe con la metadata del objeto seurat completo
+metadata_all <- P304@meta.data
+
+# En ese dataframe, creamos una variable que se llama cell_type y le asignamos los valores de las anotaciones que ya teniamos (luego modificaremos esta variable nueva)
+metadata_all$cell_type <- metadata_all$customclassif
+
+# Cogemos el dataframe con la metadata del objeto seurat subset (el que contiene solo celulas immunitarias que ya has anotado)
+metadata_immune <- immunecells@meta.data
+
+# De la variable cell_type, cambiamos los valores de las células presentes en el subset immunitarias y les cambiamos la anotación por la nueva (la presente en el subset)
+metadata_all$cell_type[rownames(metadata_all) %in% rownames(metadata_immune)] <- metadata_immune$customclassif
+
+# Actualizamos el metadata del seurat completo
+P304@meta.data <- metadata_all
+
+
+```
+
+```{r}
+DimPlot(P304, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'cell_type')  
+```
+# P308
+
+```{r}
+P308<-subset(GSE124395_NF, orig.ident=="P308")
+```
+
+
+```{r normalizacion}
+P308 <- NormalizeData(P308)
+```
+```{R}
+P308 <- FindVariableFeatures(P308, selection.method = "vst", nfeatures = 2000)
+
+top10 <- head(VariableFeatures(P308), 10)
+
+plot1 <- VariableFeaturePlot(P308)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+
+all.genes <- rownames(P308)
+P308 <- ScaleData(P308, features = all.genes)
+
+P308 <- RunPCA(P308, features = VariableFeatures(object = P308))
+
+print(P308[["pca"]], dims = 1:5, nfeatures = 5)
+
+ElbowPlot(P308)
+```
+
+
+
+```{r}
+
+P308<- FindNeighbors(P308, reduction = "pca", dims = 1:20)
+P308 <- FindClusters(P308, reduction = "pca")
+P308 <- RunUMAP(P308, reduction = "pca", dims = 1:20)
+
+```
+```{r visualizacion}
+p1 <- DimPlot(P308, reduction = "umap", group.by = "orig.ident")
+p2 <- DimPlot(P308, reduction = "umap", label = TRUE, repel = TRUE)
+p1 + p2
+```
+```{r}
+DimPlot(P308, reduction = "umap", split.by = "orig.ident")
+```
+
+```{r ANNOTATION ScTypeload function}
+# load gene set preparation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R")
+# load cell type annotation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
+
+```
+
+
+```{r}
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue = "Liver" 
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+```
+
+```{r}
+# get cell-type by cell matrix
+es.max = sctype_score(scRNAseqData = P308[["RNA"]]@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = NULL) 
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(P308@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(P308@meta.data[P308@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(P308@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+```
+```{r}
+P308@meta.data$customclassif = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  P308@meta.data$customclassif[P308@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(immune.combined, 
+        
+        , label = TRUE, repel = TRUE, group.by = 'customclassif')        
+
+```
+```{r immune cells}
+immunecells <- subset(P308, subset = customclassif == "Immune system cells")
+```
+
+```{r anotation immune cells}
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue = "Immune system"
+
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+
+
+# get cell-type by cell matrix
+es.max = sctype_score(scRNAseqData = immunecells[["RNA"]]@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = gs_list$gs_negative) 
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(immunecells@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(immunecells@meta.data[immunecells@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(immunecells@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+
+immunecells@meta.data$customclassif = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  immunecells@meta.data$customclassif[immunecells@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(immunecells, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'customclassif')        
+
+```
+```{r}
+# Cogemos el dataframe con la metadata del objeto seurat completo
+metadata_all <- P308@meta.data
+
+# En ese dataframe, creamos una variable que se llama cell_type y le asignamos los valores de las anotaciones que ya teniamos (luego modificaremos esta variable nueva)
+metadata_all$cell_type <- metadata_all$customclassif
+
+# Cogemos el dataframe con la metadata del objeto seurat subset (el que contiene solo celulas immunitarias que ya has anotado)
+metadata_immune <- immunecells@meta.data
+
+# De la variable cell_type, cambiamos los valores de las células presentes en el subset immunitarias y les cambiamos la anotación por la nueva (la presente en el subset)
+metadata_all$cell_type[rownames(metadata_all) %in% rownames(metadata_immune)] <- metadata_immune$customclassif
+
+# Actualizamos el metadata del seurat completo
+P308@meta.data <- metadata_all
+
+
+```
+
+```{r}
+DimPlot(P308, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'cell_type')  
+```
+
+# P309
+
+```{r}
+P309<-subset(GSE124395_NF, orig.ident=="P309")
+```
+
+
+```{r normalizacion}
+P309 <- NormalizeData(P309)
+```
+```{R}
+P309 <- FindVariableFeatures(P309, selection.method = "vst", nfeatures = 2000)
+
+top10 <- head(VariableFeatures(P309), 10)
+
+plot1 <- VariableFeaturePlot(P309)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+
+all.genes <- rownames(P309)
+P309 <- ScaleData(P309, features = all.genes)
+
+P309 <- RunPCA(P309, features = VariableFeatures(object = P309))
+
+print(P309[["pca"]], dims = 1:5, nfeatures = 5)
+
+ElbowPlot(P309)
+```
+
+
+
+```{r}
+
+P309<- FindNeighbors(P309, reduction = "pca", dims = 1:20)
+P309 <- FindClusters(P309, reduction = "pca")
+P309 <- RunUMAP(P309, reduction = "pca", dims = 1:20)
+
+```
+```{r visualizacion}
+p1 <- DimPlot(P309, reduction = "umap", group.by = "orig.ident")
+p2 <- DimPlot(P309, reduction = "umap", label = TRUE, repel = TRUE)
+p1 + p2
+```
+```{r}
+DimPlot(P309, reduction = "umap", split.by = "orig.ident")
+```
+
+```{r ANNOTATION ScTypeload function}
+# load gene set preparation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R")
+# load cell type annotation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
+
+```
+
+
+```{r}
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue = "Liver" 
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+```
+
+```{r}
+# get cell-type by cell matrix
+es.max = sctype_score(scRNAseqData = P309[["RNA"]]@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = NULL) 
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(P309@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(P309@meta.data[P309@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(P309@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+```
+```{r}
+P309@meta.data$customclassif = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  P309@meta.data$customclassif[P309@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(immune.combined, 
+        
+        , label = TRUE, repel = TRUE, group.by = 'customclassif')        
+
+```
+```{r immune cells}
+immunecells <- subset(P309, subset = customclassif == "Immune system cells")
+```
+
+```{r anotation immune cells}
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue = "Immune system"
+
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+
+
+# get cell-type by cell matrix
+es.max = sctype_score(scRNAseqData = immunecells[["RNA"]]@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = gs_list$gs_negative) 
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(immunecells@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(immunecells@meta.data[immunecells@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(immunecells@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+
+immunecells@meta.data$customclassif = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  immunecells@meta.data$customclassif[immunecells@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(immunecells, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'customclassif')        
+
+```
+```{r}
+# Cogemos el dataframe con la metadata del objeto seurat completo
+metadata_all <- P309@meta.data
+
+# En ese dataframe, creamos una variable que se llama cell_type y le asignamos los valores de las anotaciones que ya teniamos (luego modificaremos esta variable nueva)
+metadata_all$cell_type <- metadata_all$customclassif
+
+# Cogemos el dataframe con la metadata del objeto seurat subset (el que contiene solo celulas immunitarias que ya has anotado)
+metadata_immune <- immunecells@meta.data
+
+# De la variable cell_type, cambiamos los valores de las células presentes en el subset immunitarias y les cambiamos la anotación por la nueva (la presente en el subset)
+metadata_all$cell_type[rownames(metadata_all) %in% rownames(metadata_immune)] <- metadata_immune$customclassif
+
+# Actualizamos el metadata del seurat completo
+P309@meta.data <- metadata_all
+
+
+```
+
+```{r}
+DimPlot(P309, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'cell_type')  
+```
+
+# P310
+
+```{r}
+P310<-subset(GSE124395_NF, orig.ident=="P310")
+```
+
+
+```{r normalizacion}
+P310 <- NormalizeData(P310)
+```
+```{R}
+P310 <- FindVariableFeatures(P310, selection.method = "vst", nfeatures = 2000)
+
+top10 <- head(VariableFeatures(P310), 10)
+
+plot1 <- VariableFeaturePlot(P310)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+
+all.genes <- rownames(P310)
+P310 <- ScaleData(P310, features = all.genes)
+
+P310 <- RunPCA(P310, features = VariableFeatures(object = P310))
+
+print(P310[["pca"]], dims = 1:5, nfeatures = 5)
+
+ElbowPlot(P310)
+```
+
+
+
+```{r}
+
+P310<- FindNeighbors(P310, reduction = "pca", dims = 1:20)
+P310 <- FindClusters(P310, reduction = "pca")
+P310 <- RunUMAP(P310, reduction = "pca", dims = 1:20)
+
+```
+```{r visualizacion}
+p1 <- DimPlot(P310, reduction = "umap", group.by = "orig.ident")
+p2 <- DimPlot(P310, reduction = "umap", label = TRUE, repel = TRUE)
+p1 + p2
+```
+```{r}
+DimPlot(P310, reduction = "umap", split.by = "orig.ident")
+```
+
+```{r ANNOTATION ScTypeload function}
+# load gene set preparation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R")
+# load cell type annotation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
+
+```
+
+
+```{r}
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue = "Liver" 
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+```
+
+```{r}
+# get cell-type by cell matrix
+es.max = sctype_score(scRNAseqData = P310[["RNA"]]@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = NULL) 
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(P310@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(P310@meta.data[P310@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(P310@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+```
+```{r}
+P310@meta.data$customclassif = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  P310@meta.data$customclassif[P310@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(immune.combined, 
+        
+        , label = TRUE, repel = TRUE, group.by = 'customclassif')        
+
+```
+```{r immune cells}
+immunecells <- subset(P310, subset = customclassif == "Immune system cells")
+```
+
+```{r anotation immune cells}
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue = "Immune system"
+
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+
+
+# get cell-type by cell matrix
+es.max = sctype_score(scRNAseqData = immunecells[["RNA"]]@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = gs_list$gs_negative) 
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(immunecells@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(immunecells@meta.data[immunecells@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(immunecells@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+
+immunecells@meta.data$customclassif = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  immunecells@meta.data$customclassif[immunecells@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(immunecells, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'customclassif')        
+
+```
+```{r}
+# Cogemos el dataframe con la metadata del objeto seurat completo
+metadata_all <- P310@meta.data
+
+# En ese dataframe, creamos una variable que se llama cell_type y le asignamos los valores de las anotaciones que ya teniamos (luego modificaremos esta variable nueva)
+metadata_all$cell_type <- metadata_all$customclassif
+
+# Cogemos el dataframe con la metadata del objeto seurat subset (el que contiene solo celulas immunitarias que ya has anotado)
+metadata_immune <- immunecells@meta.data
+
+# De la variable cell_type, cambiamos los valores de las células presentes en el subset immunitarias y les cambiamos la anotación por la nueva (la presente en el subset)
+metadata_all$cell_type[rownames(metadata_all) %in% rownames(metadata_immune)] <- metadata_immune$customclassif
+
+# Actualizamos el metadata del seurat completo
+P310@meta.data <- metadata_all
+
+
+```
+
+```{r}
+DimPlot(P310, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'cell_type')  
+```
+
+# P311
+
+```{r}
+P311<-subset(GSE124395_NF, orig.ident=="P311")
+```
+
+
+```{r normalizacion}
+P311 <- NormalizeData(P311)
+```
+```{R}
+P311 <- FindVariableFeatures(P311, selection.method = "vst", nfeatures = 2000)
+
+top10 <- head(VariableFeatures(P311), 10)
+
+plot1 <- VariableFeaturePlot(P311)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+
+all.genes <- rownames(P311)
+P311 <- ScaleData(P311, features = all.genes)
+
+P311 <- RunPCA(P311, features = VariableFeatures(object = P309))
+
+print(P311[["pca"]], dims = 1:5, nfeatures = 5)
+
+ElbowPlot(P311)
+```
+
+
+
+```{r}
+
+P311<- FindNeighbors(P311, reduction = "pca", dims = 1:20)
+P311 <- FindClusters(P311, reduction = "pca")
+P311 <- RunUMAP(P311, reduction = "pca", dims = 1:20)
+
+```
+```{r visualizacion}
+p1 <- DimPlot(P311, reduction = "umap", group.by = "orig.ident")
+p2 <- DimPlot(P311, reduction = "umap", label = TRUE, repel = TRUE)
+p1 + p2
+```
+```{r}
+DimPlot(P311, reduction = "umap", split.by = "orig.ident")
+```
+
+```{r ANNOTATION ScTypeload function}
+# load gene set preparation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R")
+# load cell type annotation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
+
+```
+
+
+```{r}
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue = "Liver" 
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+```
+
+```{r}
+# get cell-type by cell matrix
+es.max = sctype_score(scRNAseqData = P311[["RNA"]]@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = NULL) 
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(P311@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(P311@meta.data[P311@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(P311@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+```
+```{r}
+P311@meta.data$customclassif = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  P311@meta.data$customclassif[P311@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(immune.combined, 
+        
+        , label = TRUE, repel = TRUE, group.by = 'customclassif')        
+
+```
+```{r immune cells}
+immunecells <- subset(P311, subset = customclassif == "Immune system cells")
+```
+
+```{r anotation immune cells}
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue = "Immune system"
+
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+
+
+# get cell-type by cell matrix
+es.max = sctype_score(scRNAseqData = immunecells[["RNA"]]@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = gs_list$gs_negative) 
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(immunecells@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(immunecells@meta.data[immunecells@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(immunecells@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+
+immunecells@meta.data$customclassif = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  immunecells@meta.data$customclassif[immunecells@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(immunecells, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'customclassif')        
+
+```
+```{r}
+# Cogemos el dataframe con la metadata del objeto seurat completo
+metadata_all <- P311@meta.data
+
+# En ese dataframe, creamos una variable que se llama cell_type y le asignamos los valores de las anotaciones que ya teniamos (luego modificaremos esta variable nueva)
+metadata_all$cell_type <- metadata_all$customclassif
+
+# Cogemos el dataframe con la metadata del objeto seurat subset (el que contiene solo celulas immunitarias que ya has anotado)
+metadata_immune <- immunecells@meta.data
+
+# De la variable cell_type, cambiamos los valores de las células presentes en el subset immunitarias y les cambiamos la anotación por la nueva (la presente en el subset)
+metadata_all$cell_type[rownames(metadata_all) %in% rownames(metadata_immune)] <- metadata_immune$customclassif
+
+# Actualizamos el metadata del seurat completo
+P311@meta.data <- metadata_all
+
+
+```
+
+```{r}
+DimPlot(P311, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'cell_type')  
+```
+```{r}
+prop.table(table(P1TLH$cell_type))
+table(P1TLH$cell_type)
+```
+```{r}
+prop.table(table(P2TLH$cell_type))
+table(P2TLH$cell_type)
+```
+```{r}
+prop.table(table(P3TLH$cell_type))
+```
+````{r}
+prop.table(table(P4TLH$cell_type))
+```
+```{r}
+prop.table(table(P5TLH$cell_type))
+```
+```{r}
+prop.table(table(P301$cell_type))
+```
+```{r}
+prop.table(table(P304$cell_type))
+```
+```{r}
+prop.table(table(P308$cell_type))
+```
+```{r}
+prop.table(table(P309$cell_type))
+```
+```{r}
+prop.table(table(P310$cell_type))
+```
+```{r}
+prop.table(table(P311$cell_type))
+```
+```{r}
+table(P311$cell_type)
+table(P310$cell_type)
+table(P309$cell_type)
+table(P308$cell_type)
+table(P304$cell_type)
+table(P301$cell_type)
+table(P1TLH$cell_type)
+table(P2TLH$cell_type)
+table(P3TLH$cell_type)
+table(P4TLH$cell_type)
+table(P5TLH$cell_type)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
